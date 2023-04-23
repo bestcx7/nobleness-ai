@@ -4,3 +4,7 @@ numpy
 torch
 pathlib
 timm
+decord
+webdataset
+omegaconf
+torchvision

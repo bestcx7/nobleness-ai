@@ -52,4 +52,33 @@ class Registry:
         """
 
         def wrap(task_cls):
-            from task.base_task import BaseTask
+            from tasks.base_task import BaseTask
+
+            assert issubclass(
+                task_cls, BaseTask
+            ), "All tasks must inherit BaseTask class"
+            if name in cls.mapping["task_name_mapping"]:
+                raise KeyError(
+                    "Name '{}' already registered for {}.".format(
+                        name, cls.mapping["task_name_mapping"][name]
+                    )
+                )
+            cls.mapping["task_name_mapping"][name] = task_cls
+            return task_cls
+        
+        return wrap
+    
+    @classmethod
+    def register_model(cls, name):
+        r"""
+        使用关键词key注册一个任务
+
+        参数：
+            name: 被注册任务的key
+
+        使用方法：
+           from common.registry import registry
+        """
+
+        def wrap(model_cls):
+            from models import BaseModel

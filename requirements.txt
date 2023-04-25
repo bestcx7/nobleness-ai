@@ -8,3 +8,4 @@ decord
 webdataset
 omegaconf
 torchvision
+iopath

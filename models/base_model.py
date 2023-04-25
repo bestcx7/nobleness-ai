@@ -124,3 +124,102 @@ class BaseEncoder(nn.Module):
     @property
     def device(self):
         return list(self.parameters())[0].device
+    
+class sharedQueueMixin:
+    @torch.no_grad()
+    def _dequeue_and_enqueue(self, image_feat, text_feat, idxs=None):
+        # 在更新队列之前，汇聚所有的key
+        image_feats = concat_all_gather(image_feat)
+        text_feats = concat_all_gather(text_feat)
+
+        batch_size = image_feats.shape[0]
+
+        ptr = int(self.queue_ptr)
+        assert self.queue_size % batch_size == 0 # 为了简单一点
+
+        # 在prt中替换keys(出队和入队)
+        self.image_queue[:, ptr : ptr + batch_size] = image_feats.T
+        self.text_queue[:, ptr : ptr + batch_size] = text_feats.T
+
+        if idxs is not None:
+            idxs = concat_all_gather(idxs)
+            self.idx_queue[:, ptr : ptr + batch_size] = idxs.T
+
+        ptr = (ptr + batch_size) % self.queue_size # 移动指针
+        self.queue_ptr[0] = ptr
+
+
+class MonentumDistilationMixin:
+    # 将源模型(model_pair[0])的参数值拷贝到目标模型(model_pair[1])的参数值上
+    @torch.no_grad()
+    def copy_params(self):
+        for model_pair in self.model_pairs:
+            for param, param_m in zip(
+                model_pair[0].parameters, model_pair[1].parameters()
+            ):
+                param_m.data = param_m.data * self.momentum + param.data * (
+                    1.0 - self.momentum
+                )
+
+class GatherLayer(torch.autograd.Function):
+    """
+    从所有的进程中收集支持反向传播的的张量
+    通过调用torch的分布式库在不截断梯度上实现
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        output = [
+            torch.zeros_like(x) for _ in range(torch.distributions.get_world_size())
+        ]
+        torch.distributed.all_gather(output, x)
+        return tuple(output)
+    
+    @staticmethod
+    def backward(ctx, *grads):
+        all_gradients = torch.stack(grads)
+        torch.distributed.all_reduce(all_gradients)
+        return all_gradients[torch.distributed.get_rank()]
+    
+    
+def all_gather_with_grad(tensors):
+    """
+    对输入的张量进行all_gather操作并进行图连接以便反向传播
+    """
+    world_size = torch.distributed.get_world_size()
+    # 如果是单进程，不需要all_gather
+    if world_size == 1:
+        return tensors
+    
+    # tensor_all = GatherLayer.apply(tensor)
+    tensor_all = GatherLayer.apply(tensors)
+    
+    return torch.cat(tensor_all, dim=0)
+
+@torch.no_grad
+def concat_all_gather(tensor):
+    """
+    在提供的张量上进行all_gather操作
+    ***警告***:torch.distributed.all_gather没有梯度
+    """
+    # 如果使用分布式训练
+    if not is_dist_avail_and_initialized():
+        return tensor
+    
+    tensors_gather = [
+        torch.ones_like(tensor) for _ in range(torch.distributed.get_world_size())
+    ]
+    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+
+    output = torch.cat(tensors_gather, dim=0)
+    return output
+
+def tile(x, dim, n_tile):
+    init_dim = x.size(dim)
+    repeat_idx = [1] * x.dim()
+    repeat_idx[dim] = n_tile
+    x = x.repeat(*(repeat_idx))
+    order_index = torch.LongTensor(
+        np.concatenate([init_dim * np.arange(n_tile) + i for i in range(init_dim)])
+    )
+    return torch.index_select(x, dim, order_index.to(x.device))

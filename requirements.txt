@@ -9,3 +9,4 @@ webdataset
 omegaconf
 torchvision
 iopath
+transformers
